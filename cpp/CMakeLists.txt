@@ -32,6 +32,7 @@ endif ()
 
 # OnnxRuntime
 if (OCR_ONNX STREQUAL "CPU")
+    message(${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime-static/OnnxRuntimeWrapper.cmake)
     include(${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime-static/OnnxRuntimeWrapper.cmake)
 elseif (OCR_ONNX STREQUAL "CUDA") # CUDA
     include(${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime-gpu/OnnxRuntimeWrapper.cmake)

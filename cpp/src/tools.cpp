@@ -1,8 +1,11 @@
 #include <string>
 #include <iostream>
 #include <fstream> // 读文件 
-#include <windows.h> // 剪贴板相关
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <filesystem> // 配置文件存在检查 
+#include <wordexp.h> // Unix路径展开
 
 #include "tools.h"
 #include "tools_flags.h" // 标志
@@ -68,6 +71,10 @@ namespace tool {
         size_t lenWchar = mbstowcs(NULL, c, 0); // 得到转为宽字符串的长度
         wchar_t* wc = new wchar_t[lenWchar + 1]; // 存放文件名的宽字符串
         int n = mbstowcs(wc, c, lenWchar + 1); // 多字节转宽字符
+        if (n == (size_t)-1) {
+            delete[] wc;
+            return nullptr;
+        }
         setlocale(LC_ALL, "C"); // 还原区域设置为默认
         return wc;
     }
@@ -147,18 +154,19 @@ namespace tool {
 
     // 检查路径pathW是否为文件，是返回true
     bool is_exists_wstr(wstring pathW) {
-        struct _stat buf;
-        int result = _wstat((wchar_t*)pathW.c_str(), &buf);
-        if (result != 0) { // 发生错误
-            return false;
-        }
-        if (S_IFREG & buf.st_mode) { // 是文件
-            return true;
-        }
-        // else if (S_IFDIR & buf.st_mode) { // 是目录
-           //return false;
+        return true;
+        // struct _stat buf;
+        // int result = _wstat((wchar_t*)pathW.c_str(), &buf);
+        // if (result != 0) { // 发生错误
+        //     return false;
         // }
-        return false;
+        // if (S_IFREG & buf.st_mode) { // 是文件
+        //     return true;
+        // }
+        // // else if (S_IFDIR & buf.st_mode) { // 是目录
+        //    //return false;
+        // // }
+        // return false;
     }
 
     // 代替 cv::imread ，从路径pathW读入一张图片。pathW必须为unicode的wstring
@@ -169,7 +177,7 @@ namespace tool {
             set_state(CODE_ERR_PATH_EXIST, MSG_ERR_PATH_EXIST(pathU8)); // 报告状态：路径不存在且无法输出
             return cv::Mat();
         }
-        FILE* fp = _wfopen((wchar_t*)pathW.c_str(), L"rb"); // wpath强制类型转换到whar_t，尝试打开文件
+        FILE* fp = fopen(pathU8.c_str(), "rb"); // 使用UTF-8路径打开文件
         if (!fp) { // 打开失败
             set_state(CODE_ERR_PATH_READ, MSG_ERR_PATH_READ(pathU8)); // 报告状态：无法读取
             return cv::Mat();
@@ -180,6 +188,12 @@ namespace tool {
         char* buf = new char[sz]; // 存放文件字节内容
         fseek(fp, 0, SEEK_SET); // 设置流 fp 的文件位置为 SEEK_SET 文件的开头
         long n = fread(buf, 1, sz, fp); // 从给定流 fp 读取数据到 buf 所指向的数组中，返回成功读取的元素总数
+        if (n != sz) {
+            delete[] buf;
+            fclose(fp);
+            set_state(CODE_ERR_PATH_READ, MSG_ERR_PATH_READ(pathU8));
+            return cv::Mat();
+        }
         cv::_InputArray arr(buf, sz); // 转换为OpenCV数组
         cv::Mat img = cv::imdecode(arr, flags); // 解码内存数据，变成cv::Mat数据
         delete[] buf; // 释放buf空间
@@ -192,106 +206,6 @@ namespace tool {
 
     // 从剪贴板读入一张图片。
     cv::Mat imread_clipboard(int flags = cv::IMREAD_COLOR) {
-        // 参考文档： https://docs.microsoft.com/zh-cn/windows/win32/dataxchg/using-the-clipboard
-
-        // 尝试打开剪贴板，锁定，防止其他应用程序修改剪贴板内容
-        if (!OpenClipboard(NULL)) {
-            set_state(CODE_ERR_CLIP_OPEN, MSG_ERR_CLIP_OPEN); // 报告状态：剪贴板打开失败
-        }
-        else {
-            static UINT auPriorityList[] = {  // 允许读入的剪贴板格式：
-              CF_BITMAP,                      // 位图
-              CF_HDROP,                       // 文件列表句柄（文件管理器选中文件复制）
-            };
-            int auPriorityLen = sizeof(auPriorityList) / sizeof(auPriorityList[0]); // 列表长度
-            int uFormat = GetPriorityClipboardFormat(auPriorityList, auPriorityLen); // 获取当前剪贴板内容的格式
-            // 根据格式分配不同任务。
-            //     若任务成功，释放全部资源，关闭剪贴板，返回图片mat。
-            //     若任务失败，释放已打开的资源和锁，报告状态，跳出switch，统一关闭剪贴板和返回空mat
-            switch (uFormat)
-            {
-
-            case CF_BITMAP: { // 1. 位图 ===================================================================
-                HBITMAP hbm = (HBITMAP)GetClipboardData(uFormat); // 1.1. 从剪贴板中录入指针，得到文件句柄
-                if (hbm) {
-                    // GlobalLock(hbm); // 返回值总是无效的，读位图似乎不需要锁？
-                  // https://social.msdn.microsoft.com/Forums/vstudio/en-US/d2a6aa71-68d7-4db0-8b1f-5d1920f9c4ce/globallock-and-dib-transform-into-hbitmap-issue?forum=vcgeneral
-                    BITMAP bmp; // 存放指向缓冲区的指针，缓冲区接收有关指定图形对象的信息
-                    GetObject(hbm, sizeof(BITMAP), &bmp); // 1.2. 获取图形对象的信息（不含图片内容本身）
-                    if (!hbm) {
-                        set_state(CODE_ERR_CLIP_GETOBJ, MSG_ERR_CLIP_GETOBJ); // 报告状态：检索图形对象信息失败
-                        break;
-                    }
-                    int nChannels = bmp.bmBitsPixel == 1 ? 1 : bmp.bmBitsPixel / 8; // 根据色深计算通道数，32bit为4，24bit为3
-                    // 1.3. 将句柄hbm中的位图复制到缓冲区
-                    long sz = bmp.bmHeight * bmp.bmWidth * nChannels; // 图片大小（字节）
-                    cv::Mat mat(cv::Size(bmp.bmWidth, bmp.bmHeight), CV_MAKETYPE(CV_8U, nChannels));  // 创造空矩阵，传入位图大小和深度
-                    long getsz = GetBitmapBits(hbm, sz, mat.data); // 将句柄hbm中sz个字节复制到缓冲区img.data
-                    if (!getsz) {
-                        set_state(CODE_ERR_CLIP_BITMAP, MSG_ERR_CLIP_BITMAP); // 报告状态：获取位图数据失败
-                        break;
-                    }
-                    CloseClipboard();  // 释放资源
-                    // 1.4. 返回合适的通道
-                    if (mat.data) {
-                        if (nChannels == 1 || nChannels == 3) { // 1或3通道，PPOCR可识别，直接返回
-                            return mat;
-                        }
-                        else if (nChannels == 4) { // 4通道，PPOCR不可识别，删去alpha转3通道再返回
-                            cv::Mat mat_c3;
-                            cv::cvtColor(mat, mat_c3, cv::COLOR_BGRA2BGR); // 色彩空间转换
-                            return mat_c3;
-                        }
-                        set_state(CODE_ERR_CLIP_CHANNEL, MSG_ERR_CLIP_CHANNEL(nChannels)); // 报告状态：通道数异常
-                        break;
-                    }
-                    // 理论上上面 !getsz 已经 break 了，不会走到这里。保险起见再报告一次
-                    set_state(CODE_ERR_CLIP_BITMAP, MSG_ERR_CLIP_BITMAP); // 报告状态：获取位图数据失败
-                    break;
-                }
-                set_state(CODE_ERR_CLIP_DATA, MSG_ERR_CLIP_DATA); // 报告状态：获取剪贴板数据失败
-                break;
-            }
-
-            case CF_HDROP: { // 2. 文件列表句柄 =========================================================== 
-                HDROP hClip = (HDROP)GetClipboardData(uFormat); // 2.1. 得到文件列表的句柄
-                if (hClip) {
-                    // https://docs.microsoft.com/zh-CN/windows/win32/api/shellapi/nf-shellapi-dragqueryfilea
-                    GlobalLock(hClip); // 2.2. 锁定全局内存对象
-                    int iFiles = DragQueryFile(hClip, 0xFFFFFFFF, NULL, 0); // 2.3. 0xFFFFFFFF表示返回文件列表的计数
-                    if (iFiles != 1) { // 只允许1个文件
-                        GlobalUnlock(hClip);
-                        set_state(CODE_ERR_CLIP_FILES, MSG_ERR_CLIP_FILES(iFiles)); // 报告状态：文件的数量不为1
-                        break;
-                    }
-                    //for (int i = 0; i < iFiles; i++) {
-                    int i = 0; // 只取第1个文件
-                    UINT lenChar = DragQueryFile(hClip, i, NULL, 0); // 2.4. 得到第i个文件名读入所需缓冲区的大小（字节）
-                    char* nameC = new char[lenChar + 1]; // 存放文件名的字节内容
-                    DragQueryFileA(hClip, i, nameC, lenChar + 1); // 2.5. 读入第i个文件名
-                    wchar_t* nameW = char_2_wchar(nameC); // 2.6. 文件名转为宽字节数组
-                    cv::Mat mat = imread_wstr(nameW); // 2.7. 尝试读取文件
-                    // 释放资源
-                    delete[] nameC;
-                    delete[] nameW;
-                    GlobalUnlock(hClip); // 2.x.1 释放文件列表句柄
-                    CloseClipboard(); // 2.x.2 关闭剪贴板
-                    return mat;
-                }
-                set_state(CODE_ERR_CLIP_DATA, MSG_ERR_CLIP_DATA); // 报告状态：获取剪贴板数据失败
-                break;
-            }
-
-            case NULL: // 剪贴板为空
-                set_state(CODE_ERR_CLIP_EMPTY, MSG_ERR_CLIP_EMPTY); // 报告状态：剪贴板为空
-                break;
-            case -1: // 其它不支持的格式
-            default: // 未知
-                set_state(CODE_ERR_CLIP_FORMAT, MSG_ERR_CLIP_FORMAT); // 报告状态： 剪贴板的格式不支持
-                break;
-            }
-            CloseClipboard(); // 为break的情况关闭剪贴板，使其他窗口能够继续访问剪贴板。
-        }
         return cv::Mat();
     }
 
@@ -301,6 +215,16 @@ namespace tool {
         if (pathU8 == u8"clipboard") { // 若为剪贴板任务
             return imread_clipboard(flags);
         }
+
+        // 处理Unix风格的路径展开（如~）
+        wordexp_t exp_result;
+        if (wordexp(pathU8.c_str(), &exp_result, 0) == 0) {
+            if (exp_result.we_wordc > 0) {
+                pathU8 = exp_result.we_wordv[0];
+            }
+            wordfree(&exp_result);
+        }
+
         // string u8 转 wchar_t
         std::wstring wpath;
         try {
