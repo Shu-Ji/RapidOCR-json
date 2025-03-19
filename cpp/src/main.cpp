@@ -264,9 +264,6 @@ int main(int argc, char **argv) {
             flagGpu);
     OCRLiteP = &ocrLite;
 
-    std::cout << PROJECT_NAME << std::endl; // 版本提示
-    std::cout << "OCR init completed." << std::endl; // 完成提示
-
     // ==================== 启动OCR ==================== 
     startOCR(imgPath);
     return 0;
